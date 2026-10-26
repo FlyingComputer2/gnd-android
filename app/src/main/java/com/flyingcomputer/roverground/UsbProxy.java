@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.*;
 public final class UsbProxy implements AutoCloseable {
     public interface Handler {
         default void onOpen(Channel sender) {}
+        default String format() { return null; }
         void onPacket(Lease packet, Channel sender);
         default void onClose() {}
     }
@@ -35,11 +36,11 @@ public final class UsbProxy implements AutoCloseable {
             new ArrayBlockingQueue<>(16),r->new Thread(r,"usb-channel"));
         private final ArrayBlockingQueue<byte[]> outgoing=new ArrayBlockingQueue<>(8);
         private int mtu=1445, txCredits, txWindow, rxCredits, rxWindow, pendingCredit, sequence;
-        private boolean open;
+        private boolean open, readOnly;
         private Channel(int id,Handler handler) { this.id=id; this.handler=handler; }
         public boolean trySend(byte[] payload) {
             synchronized(state) {
-                if(!running || !open || payload.length==0 || payload.length>mtu) return false;
+                if(!running || !open || readOnly || payload.length==0 || payload.length>mtu) return false;
                 boolean ok=outgoing.offer(payload.clone()); state.notifyAll(); return ok;
             }
         }
@@ -47,6 +48,10 @@ public final class UsbProxy implements AutoCloseable {
             if(receiveWindow<1 || receiveWindow>16) throw new IllegalArgumentException("window");
             request(new JSONObject().put("op","open").put("channel",id).put("rx_window",receiveWindow), reply->{
                 synchronized(state) {
+                    String expected=handler.format();
+                    if(expected!=null && !expected.equals(reply.optString("format")))
+                        throw new IOException("video format mismatch: update P4 and Android together; expected "+expected);
+                    readOnly=reply.optBoolean("read_only",false);
                     rxWindow=rxCredits=receiveWindow;
                     txWindow=txCredits=reply.getInt("rx_window"); mtu=reply.getInt("max_payload");
                     if(txWindow<1 || txWindow>16 || mtu<1 || mtu>2048) throw new IOException("invalid channel limits");

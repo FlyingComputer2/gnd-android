@@ -1,20 +1,19 @@
 # rover-ground-android
 
 Android USB ground station for [rover-ground-esp32p4](https://github.com/FlyingComputer2/rover-ground-esp32p4).
-Android is the USB host; the P4 runs winject-l3 and forwards application datagrams
-from its L3-created `UpstreamQueue` transport over vendor bulk endpoints.
+Android is the USB host. P4 runs winject-l3 and stream_receiver, recovers radio
+FEC, and fans recovered RTP H.264 to Ethernet multicast and USB channel 0.
 
 | USB channel (unsigned 16-bit) | Service |
 | --- | --- |
-| 0 | Video: vstreamer wire datagrams and reverse link reports |
+| 0 | Video: receive-only RTP H.264 (`rtp-h264-v1`) |
 | 1 | MSP DisplayPort — TBA |
 | 2 | MSP RC telemetry — TBA |
 
-The app currently registers only video. It reuses vstreamer's C++ Reed-Solomon
-receiver, stream framing and RTP/H.264 depacketizer through JNI; Android
-`MediaCodec` decodes access units onto a Surface. No vstreamer video processing
-runs on the ground P4. Upstream manager FEC is disabled for video, preserving
-vstreamer's end-to-end FEC.
+The app registers only video. Its JNI receiver depayloads RTP H.264 into
+Annex-B access units; MediaCodec renders them onto a Surface. Radio framing,
+FEC and reverse receiver reports now belong to P4. Update both peers together:
+Android requires `rtp-h264-v1` in the OPEN reply and rejects older firmware.
 
 ## Implementation handoff
 
@@ -69,9 +68,10 @@ cmake --build native-build -j 4
 ctest --test-dir native-build --output-on-failure
 ```
 
-Dependencies are fetched at pinned revisions from vstreamer, BFC and ISA-L.
-The native test generates fragmented RTP, drops FEC shards, verifies the recovered
-Annex-B IDR byte for byte and checks reverse link reports. JVM tests cover the
+The native build fetches pinned vstreamer and compiles its portable RTP core.
+The native test generates fragmented RTP, verifies matching Annex-B IDRs and
+presentation times, and rejects malformed and legacy encapsulated inputs.
+P4 host tests cover radio FEC recovery, feedback and fanout isolation. JVM tests cover the
 shared wire fixture, split transfers, channel 0 vs management, unsigned high
 channel IDs, stale sessions and invalid lengths. GitHub Actions builds an APK
 and runs both test sets. Actual phone/P4 enumeration and live playback require

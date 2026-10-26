@@ -6,14 +6,16 @@ are the repository's implementation handoff; keep them aligned with code.
 
 ## Architecture to preserve
 
-- Android is USB host and runs the vstreamer receiver/FEC/RTP pipeline and
-  MediaCodec playback. The P4 runs winject-l3 and forwards application datagrams.
+- Android is USB host, depayloads recovered RTP H.264 and uses MediaCodec.
+  P4 runs winject-l3 and stream_receiver for framing/FEC/feedback, then fans RTP
+  to multicast and USB 0. Channel 0 requires format `rtp-h264-v1`, receive-only.
 - Channel IDs are unsigned 16-bit values. Java stores them as validated ints.
   Channel 0 is video, 1 is MSP DisplayPort (TBA), 2 is MSP RC telemetry (TBA).
 - Management dispatch uses record kinds. Channel 0 is never reserved away from
   video. Preserve the RGP4 v2 contract in `docs/USB_PROTOCOL.md`.
-- L3 creates `UpstreamQueue` when its app transport is queue. P4 registers that
-  object directly; do not substitute app-created raw queue pairs or a USB alias.
+- L3 creates `UpstreamQueue` for queue app transport. The P4 receiver consumes
+  that object; processed video has a separate bounded USB source. Direct L3 USB
+  bindings remain supported for other services. Never fabricate L3 queue handles.
 - One USB reader and writer serve independent bounded channels. Release packet
   leases to return receive credits; keep callbacks off the USB reader thread.
 - Keep vstreamer dependencies pinned. Change shared protocol behavior in concert

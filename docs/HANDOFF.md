@@ -8,38 +8,29 @@ handoff is sufficient without the original conversation. Check current Git
 status and remote revisions before editing; the initial implementation snapshot
 is not a guarantee that another agent has made no subsequent changes.
 
-Runtime baseline checked on 2026-10-26:
-
-| Repository | Revision / status |
-| --- | --- |
-| Android | `da3f881411adbee88d13b361ca20e87149a2b4db`, published on main |
-| P4 | `5ca7857268102200e8ef225f5cd914438864366a`, PR #1 open/unmerged when checked |
-| Android CI | [40266470635](https://github.com/FlyingComputer2/rover-ground-android/actions/runs/40266470635), passed |
-| P4 PR CI | [40265893870](https://github.com/FlyingComputer2/rover-ground-esp32p4/actions/runs/40265893870), passed |
-
-Android CI passed JVM wire tests, portable native FEC/RTP recovery and arm64
-APK assembly. Clean P4 CI passed fetch/patch, firmware build and USB host tests.
-The initial developer environment had no attached P4/phone. No live USB
-enumeration, permission flow, MediaCodec playback, sustained performance or
-hardware recovery result was established, and no P4 firmware was flashed.
+Current architecture update (2026-10-26): video recovery moved to P4. Earlier
+CI runs for da3f881/5ca7857 validated the old encapsulated-video architecture
+and do not validate this revision. Check the current branch CI and peer changes.
+No live P4/phone/multicast playback has been established by host tests.
 
 ## Decisions already made
 
 - Keep USB vendor bulk packets, with Android host and P4 device.
 - Keep winject-l3 on the ground P4. L3 creates `UpstreamQueue` for a queue app
-  transport; the USB proxy accepts that object directly.
-- Keep video stream decoding on Android: reuse vstreamer core/FEC/RTP through
-  JNI, then MediaCodec/Surface playback. P4 preserves vstreamer datagrams.
+  transport; P4 video consumes that object, recovers RTP and queues USB output.
+- P4 owns stream_receiver/FEC/feedback. Android owns RTP depay through JNI and
+  MediaCodec/Surface playback. USB 0 requires receive-only `rtp-h264-v1`.
 - Channel IDs are u16; 0 = video, 1 = MSP DisplayPort (TBA), 2 = MSP RC telemetry
   (TBA). Channel 0 is not reserved for management.
 - Management is selected by record kind. Both directions of every application
   channel have independent credits and bounded storage.
-- P4 uses direct upstream bindings; Android registers one packet handler per ID.
+- P4 supports direct upstream bindings and local processed sources; Android
+  registers one packet handler per ID.
 - Existing radio settings and air buses must remain compatible with the rover;
   USB ID 0 is unrelated to L3 index 1 or air channel 1.
 
-Do not reinterpret these as a request to introduce USB networking, put FEC on
-P4, port winject-l3 into the app, or implement speculative MSP wire formats.
+Do not introduce USB networking, move radio FEC back to Android, port
+winject-l3 into the app, or implement speculative MSP wire formats.
 Change architectural decisions only when the user explicitly changes scope.
 
 ## Implemented surface
@@ -56,8 +47,8 @@ channel CLOSE or STATS API. EVENT is accepted but ignored. Every locally
 registered channel must be present in P4 LIST; optional absent handlers are not
 supported. Use a new proxy and handler resources for each reconnect.
 
-The native core handles current vstreamer media records, RS recovery/deadlines,
-RTP depayloading and receiver link reports. It compiles selected portable source
+The Android native core handles recovered RTP H.264 depayloading only.
+P4 owns stream framing, RS recovery/deadlines and receiver link reports. It compiles selected portable source
 files rather than the full desktop receiver application. The decoder is a
 minimal 1080p30 MediaCodec integration. Hardware acceleration is not explicitly
 selected or verified by `createDecoderByType()`.
@@ -71,7 +62,8 @@ They do not imply every item must be implemented in one turn.
 
 Follow the [bench procedure](DEVELOPMENT.md#hardware-acceptance-procedure).
 Identify exact Android/P4/C6/rover revisions and capture logs from both ends.
-Confirm ID 0 receives real video and reverse reports reach the rover.
+Confirm USB 0 receives recovered RTP; P4 reverse reports reach the rover
+independently of phone attachment. Confirm simultaneous multicast playback.
 
 Acceptance evidence:
 
@@ -119,10 +111,10 @@ Inspection concerns to evaluate:
 - Partial VideoReceiver construction can allocate codec/native resources before
   a later failure; make cleanup explicit for every constructor failure path.
 - The display thread logs codec output errors but does not provide a complete
-  app-visible recovery path. Scheduled tick exceptions can stop periodic work.
+  app-visible recovery path. Android no longer has a FEC/feedback timer.
 - Native method lookup/allocation and pending Java exceptions need focused
   handling. Preserve thread-local JNIEnv and synchronous callback ownership.
-- Native feed/tick/destruction must remain serialized; never retain a local
+- Native feed/destruction must remain serialized; never retain a local
   jobject/JNIEnv for an asynchronous callback on a different thread.
 - The receiver assumes 1080p30, uses fixed frame-rate timestamp conversion and
   monotonic clamping, and has no explicit stream-restart/reset policy.
@@ -132,18 +124,18 @@ Inspection concerns to evaluate:
 
 Acceptance: deterministic cleanup under construction failure, Surface loss,
 codec error and repeated reconnect; meaningful UI/error events; device tests
-with the actual rover stream. Keep FEC/packet processing off the USB reader.
+with the actual rover stream. Keep packet/depay processing off the USB reader.
 
 ### 4. Expose useful measurements before optimizing
 
-Add bounded/sampled diagnostics for wire ingress, valid/reconstructed datagrams,
-FEC recovery and residual loss, parser/session errors, queue occupancy/drops,
+Add bounded/sampled diagnostics for RTP ingress, reconstructed access units,
+P4 FEC recovery and residual loss, parser/session errors, queue occupancy/drops,
 credit stalls, feedback enqueue failures, AUs and decode/render counts.
-Separate transport, FEC and display loss; historical `udp` names in native
-counters represent USB-delivered stream datagrams here.
+Separate P4 radio/FEC loss, P4 output-queue loss, Android RTP/depay loss and
+decoder/display loss. P4 stock receiver counters retain historical `udp` names.
 
-Measure first. The native build currently uses portable scalar erasure code;
-NEON may be a follow-up if FEC is a measured bottleneck. The parser already
+Measure first. Android no longer builds erasure code; P4 receive performance must be measured
+before changing its portable scalar implementation. The parser already
 avoids allocating a ByteBuffer for every payload byte. Do not reintroduce that
 allocation pattern. Keep maximum-payload/high-bit fixtures when optimizing.
 
@@ -205,7 +197,7 @@ verify required Codex attribution trailers on every created/rewritten commit.
 > Inspect current code and Git/remote state before making changes. Preserve USB
 > bulk RGP4 v2, unsigned 16-bit channels (0 video, 1 MSP DisplayPort TBA, 2 MSP
 > RC telemetry TBA), L3-created UpstreamQueue bindings on P4, and Android-native
-> vstreamer FEC/RTP plus MediaCodec playback. Do not assume hardware validation
+> vstreamer RTP depay plus MediaCodec playback; P4 owns FEC and multicast. Do not assume hardware validation
 > from CI success. Implement the user-assigned work package, run checks relevant
 > to changed layers, update documentation, and report exact remaining hardware
 > or integration gaps. Follow repository commit-attribution requirements.
