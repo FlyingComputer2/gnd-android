@@ -24,6 +24,15 @@ public class WireTest {
             }
         }
     }
+    @Test public void maximumPayloadAndHighSessionBytewise() {
+        byte[] payload=new byte[Wire.MAX_PAYLOAD]; Arrays.fill(payload,(byte)255);
+        int session=0xdeadbeef;
+        byte[] wire=Wire.encode(new Wire.Packet(Wire.DATA,65535,session,7,payload));
+        Wire.Parser parser=new Wire.Parser(); parser.reset(session);
+        List<Wire.Packet> got=new ArrayList<>();
+        for(byte b:wire) parser.feed(new byte[]{b},1,got::add);
+        assertEquals(1,got.size()); assertArrayEquals(payload,got.get(0).payload());
+    }
     @Test public void zeroIsVideoAndStaleSessionIsIgnored() {
         Wire.Parser p=new Wire.Parser(); p.reset(2); List<Wire.Packet> got=new ArrayList<>();
         byte[] old=Wire.encode(new Wire.Packet(Wire.DATA,0,1,1,new byte[]{7}));
