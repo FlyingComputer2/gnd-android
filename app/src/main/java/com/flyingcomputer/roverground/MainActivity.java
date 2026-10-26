@@ -17,7 +17,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     private volatile boolean surfaceReady;
     private UsbProxy proxy;
     private VideoReceiver video;
-    private int currentDevice=-1;
+    private volatile int currentDevice=-1;
     private final BroadcastReceiver events=new BroadcastReceiver() {
         @Override public void onReceive(Context context,Intent intent) {
             UsbDevice device=intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
@@ -25,7 +25,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                 if(intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false) && device!=null) connect(device);
                 else show("USB permission denied");
             } else if(UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())) {
-                if(device!=null && device.getDeviceId()==currentDevice) setup.execute(()->{ disconnect(); show("USB disconnected — reconnect to resume"); });
+                if(device!=null && device.getDeviceId()==currentDevice) submit(()->{ disconnect(); show("USB disconnected — reconnect to resume"); });
             } else discover();
         }
     };
@@ -48,6 +48,10 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         else registerReceiver(events,filter);
         show("Connect P4 High Speed USB (USB3), then grant permission");
     }
+    private void submit(Runnable work) {
+        try { setup.execute(work); }
+        catch(RejectedExecutionException ignored) { /* Activity teardown already owns cleanup. */ }
+    }
     private void show(String text) { runOnUiThread(()->status.setText(text)); }
     private void discover() {
         if(!surfaceReady) return;
@@ -59,16 +63,16 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         show("P4 not found — use its High Speed USB port, not CH340");
     }
     private void connect(UsbDevice device) {
-        setup.execute(()->{
+        submit(()->{
             disconnect();
             if(!surfaceReady) return;
             show("Connecting to P4…"); currentDevice=device.getDeviceId();
             try {
                 video=new VideoReceiver(view.getHolder().getSurface());
-                proxy=new UsbProxy(error->setup.execute(()->{ disconnect(); show("USB error: "+error.getMessage()); }));
+                proxy=new UsbProxy(error->submit(()->{ disconnect(); show("USB error: "+error.getMessage()); }));
                 UsbProxy.Channel channel=proxy.registerHandler(0,video);
                 proxy.connect(manager,device); channel.open(8);
-                show("Video channel 0 connected · waiting for stream");
+                show("Video channel 0 connected");
             } catch(Exception e) { disconnect(); show("Connection failed: "+e.getMessage()); }
         });
     }
@@ -79,8 +83,8 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     }
     @Override public void surfaceCreated(SurfaceHolder holder) { surfaceReady=true; discover(); }
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int width,int height) {}
-    @Override public void surfaceDestroyed(SurfaceHolder holder) { surfaceReady=false; setup.execute(this::disconnect); }
+    @Override public void surfaceDestroyed(SurfaceHolder holder) { surfaceReady=false; submit(this::disconnect); }
     @Override public void onDestroy() {
-        unregisterReceiver(events); surfaceReady=false; setup.execute(this::disconnect); setup.shutdown(); super.onDestroy();
+        unregisterReceiver(events); surfaceReady=false; submit(this::disconnect); setup.shutdown(); super.onDestroy();
     }
 }

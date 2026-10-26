@@ -38,7 +38,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_flyingcomputer_roverground_Vide
     try {
         n->env=e; n->owner=o; n->receiver.tick(); n->owner=nullptr; n->env=nullptr;
         if(!feedback) return nullptr;
-        auto bytes=n->receiver.feedback(); auto out=e->NewByteArray(bytes.size());
+        auto bytes=n->receiver.feedback(); if(bytes.empty()) return nullptr;
+        auto out=e->NewByteArray(bytes.size());
         if(out) e->SetByteArrayRegion(out,0,bytes.size(),reinterpret_cast<const jbyte*>(bytes.data())); return out;
     } catch(const std::exception& ex) { error(e,ex.what()); return nullptr; }
 }

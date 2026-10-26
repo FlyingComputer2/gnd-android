@@ -14,6 +14,7 @@ int main() {
     while(packer.pending()) { int n=packer.pop_datagram(packet,sizeof(packet)); assert(n>0); rtp.emplace_back(packet,packet+n); }
     unsigned frames=0;
     rover::Receiver receiver([&](const auto& frame,int64_t,bool key){ assert(frame==au); assert(key); ++frames; });
+    assert(receiver.feedback().empty()); // Do not report a healthy empty link before media.
     vstreamer::rs_block_erasure encoder;
     assert(encoder.init(3,5,20,1441));
     std::vector<std::vector<uint8_t>> shards;

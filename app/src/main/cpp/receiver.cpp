@@ -31,6 +31,7 @@ void Receiver::deliver(vstreamer::fec_rx_payload_list& payloads) {
 }
 void Receiver::tick() { vstreamer::fec_rx_payload_list out; fec.poll_rx(&out); deliver(out); }
 std::vector<uint8_t> Receiver::feedback() {
+    if(!have_sequence) return {}; // Match vstreamer: report only after valid media.
     std::vector<uint8_t> out(vstreamer::k_stream_header_len+vstreamer::k_stream_link_report_payload_len);
     report.timestamp_us=std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
