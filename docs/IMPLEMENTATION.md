@@ -1,190 +1,105 @@
 # Implementation guide
 
-## Purpose and system boundary
+## System boundary
 
-The app receives rover video through a P4 ground radio attached over USB. The
-P4 owns C6/SDIO access and winject-l3. Android owns video stream reconstruction,
-playback, and eventually MSP UI/processing.
+Android displays video received over vendor USB bulk from the ground P4.
+P4 owns C6/SDIO, winject-l3, stream framing, radio FEC and receiver feedback.
+It runs vstreamer's stock `stream_receiver`, then fans recovered RTP H.264
+out to Ethernet multicast and an independent USB channel-0 queue.
 
-```mermaid
-flowchart LR
-    R[Rover vstreamer sender] <--> A[Air link / C6]
-    A <--> S[P4 SDIO radio proxy]
-    S <--> L[P4 winject-l3]
-    L <--> Q[L3-created UpstreamQueue]
-    Q <--> U[P4 USB bulk proxy]
-    U <--> P[Android UsbProxy]
-    P <--> V[VideoReceiver JNI / vstreamer FEC and RTP]
-    V --> M[MediaCodec]
-    M --> D[SurfaceView]
+```text
+Rover → radio → P4 L3 UpstreamQueue → stream_receiver → recovered RTP H.264
+                                                        ├→ Ethernet multicast
+                                                        └→ USB 0 → Android
+Android: USB 0 → JNI RTP depay → Annex-B H.264 → MediaCodec → Surface
 ```
 
-Channel 0 carries unchanged vstreamer wire datagrams toward Android and link
-reports toward the rover. USB channels 1 and 2 are assigned to MSP DisplayPort
-and MSP RC telemetry respectively, but are not implemented or registered.
+Channel 0 is receive-only video with format `rtp-h264-v1`. Each DATA payload
+contains exactly one RTP packet (maximum 1445 bytes), without a vstreamer
+header, FEC shard or additional USB video envelope. Android validates the OPEN
+format before enabling callbacks. An older firmware reply without that format
+fails the connection with an update-both-peers error. Android sends no video
+DATA and no radio feedback. RGP4 record framing remains version 2.
 
-Android does not run winject-l3, create MPDUs, control SDIO registers, or treat
-the P4 as a USB network adapter. The P4 does not unwrap video's vstreamer FEC
-or RTP. Manager-level FEC is disabled for video, so there is one vstreamer FEC
-layer end to end through the radio and USB queues.
+MSP channel 1 (DisplayPort) and channel 2 (RC/telemetry) remain unregistered.
+No MSP proxy, USB network adapter, RTSP server or recording UI is implemented.
 
 ## Source map
 
-Paths in this table are relative to the repository root.
-
-| File | Responsibility |
+| Source | Responsibility |
 | --- | --- |
-| [MainActivity.java](../app/src/main/java/com/flyingcomputer/roverground/MainActivity.java) | USB discovery/permission broadcasts, Surface lifecycle, connect UI and resource teardown |
-| [UsbProxy.java](../app/src/main/java/com/flyingcomputer/roverground/UsbProxy.java) | Handler registry, USB ownership, session negotiation, per-channel queues/credits, management correlation, reader/writer threads |
-| [Wire.java](../app/src/main/java/com/flyingcomputer/roverground/Wire.java) | Explicit little-endian RGP4 v2 codec and incremental bounded parser |
-| [VideoReceiver.java](../app/src/main/java/com/flyingcomputer/roverground/VideoReceiver.java) | Video handler, native pointer ownership, FEC timer, feedback and MediaCodec input/output |
-| [receiver.hpp](../app/src/main/cpp/receiver.hpp) / [receiver.cpp](../app/src/main/cpp/receiver.cpp) | Portable vstreamer receive wrapper and link counters |
-| [jni.cpp](../app/src/main/cpp/jni.cpp) | JNI bridge and Annex-B access-unit callback |
-| [Native CMake](../app/src/main/cpp/CMakeLists.txt) | Pinned core dependency fetches, portable receiver library, JNI or host-test target |
-| [Manifest](../app/src/main/AndroidManifest.xml) / [device filter](../app/src/main/res/xml/device_filter.xml) | USB host requirement, launcher/attach handling, VID/PID match |
-| [WireTest.java](../app/src/test/java/com/flyingcomputer/roverground/WireTest.java) | JVM wire-format regression tests |
-| [receiver_test.cpp](../native-tests/receiver_test.cpp) | Native FEC/RTP recovery and feedback regression |
-| [CI workflow](../.github/workflows/build.yml) | JVM tests, APK build, native host tests and APK artifact |
+| `MainActivity.java` | Surface lifecycle, USB permissions/discovery, setup and cleanup |
+| `UsbProxy.java` | Handler registration, management, format validation, credits and bounded queues |
+| `Wire.java` | RGP4 v2 codec/parser; unsigned 16-bit channel IDs |
+| `VideoReceiver.java` | Channel-0 handler, synchronized JNI lifetime, MediaCodec input/output |
+| `receiver.cpp` / `receiver.hpp` | Portable RTP/H.264 depayloading and AU callback |
+| `jni.cpp` | Synchronous JNI feed and Annex-B callback |
+| `app/src/main/cpp/CMakeLists.txt` | Pinned vstreamer RTP source; JNI or native-test target |
+| `native-tests/receiver_test.cpp` | Fragmented RTP, matching IDRs/PTS and malformed/legacy rejection |
 
-## Connect lifecycle
+Java sources are under `app/src/main/java/com/flyingcomputer/roverground`;
+C++ sources are under `app/src/main/cpp`.
 
-1. Android creates the Activity and SurfaceView. The Surface must exist before
-   connection starts. Work is serialized on `MainActivity.setup`.
-2. `discover()` scans for VID/PID 303a:4001. It requests Android USB permission
-   if needed, using an app-scoped PendingIntent.
-3. `connect()` first disposes of any previous proxy and video receiver, then
-   creates a fresh `VideoReceiver` for the current Surface.
-4. A fresh `UsbProxy` registers handler 0, claims USB interface 0 and locates
-   OUT 01 / IN 81. It sends RESET_SESSION, reads a nonzero session ID and starts
-   its reader/writer.
-5. HELLO negotiates v2. LIST pages discover available P4 registrations. Every
-   locally registered handler must have a remote registration; otherwise the
-   current implementation fails the connection.
-6. `Channel.open(8)` requests eight P4-to-Android receive slots. The reply
-   supplies the opposite window and effective MTU.
-7. The reader applies the successful OPEN reply before completing its future
-   or parsing following DATA, and queues `onOpen()` before packet callbacks.
-8. Detach, protocol failure, failed writes, Surface loss or Activity destruction
-   closes the connection. Reconnection constructs fresh objects and resets the
-   P4 session; it does not reuse a closed proxy or replay old datagrams.
+## Connect and thread ownership
 
-`UsbProxy` is single-use. `close()` shuts down its handler executors and sets
-an atomic closed flag. Registration/connect after close is not a supported
-reconnect path, even though every public method does not explicitly reject it.
+1. Activity setup executor disposes of old resources and creates a receiver for
+   an existing Surface, then registers handler 0 on a fresh UsbProxy.
+2. UsbProxy claims interface 0, finds bulk endpoints and resets the USB session.
+3. Reader/writer start; HELLO negotiates RGP4 v2 and LIST discovers required IDs.
+4. OPEN requests eight receive slots. On the USB reader, before accepting DATA,
+   its completion validates `format:rtp-h264-v1`, saves read-only/MTU/credit limits,
+   marks the channel open and queues onOpen before packet callbacks.
+5. One bounded worker per channel handles packets. Video native feed runs under
+   the VideoReceiver monitor and releases the packet lease in finally.
+6. Native depay synchronously calls `onAccessUnit(byte[],long,boolean)`; Java
+   submits the AU to MediaCodec. A separate video-display thread drains output.
+7. Detach, errors, Surface destruction or Activity teardown close the proxy and
+   receiver. Reconnection creates fresh objects. No old packets are replayed.
 
-## Thread and ownership model
+The USB reader never invokes video processing directly. Each channel worker
+has 16 queued callbacks; channel receive credits constrain outstanding leases.
+Lease.close is idempotent and returns one credit while the channel is active.
+Do not copy into an unbounded queue and immediately release credits.
 
-| Execution context | Work | Synchronization / ownership |
-| --- | --- | --- |
-| Android UI thread | Surface callbacks, broadcasts and text updates | Schedules setup/cleanup; does not perform bulk transfers |
-| Activity setup executor | Connection, negotiation, opening and teardown | Serializes Activity-owned `proxy`/`video` resources |
-| `usb-reader` | Blocking IN reads, parser, management replies and demultiplexing | Single reader; does not run application packet handlers |
-| `usb-writer` | Management/credit priority and round-robin DATA writes | Single writer; finishes one complete record before another |
-| One handler executor per channel | Ordered `onOpen`, `onPacket`, `onClose` callbacks | One thread, queue capacity 16 |
-| Video scheduled executor | Native deadline tick every 20 ms; feedback every fifth tick | Synchronizes on `VideoReceiver` with packet feed/destruction |
-| `video-display` | MediaCodec output dequeue and Surface rendering | Running flag controls exit; output thread is joined during receiver close |
+UsbProxy is single-use. Its writer schedules management, credits and eligible
+DATA at record boundaries. `trySend` rejects sends on read-only channels.
+Other future bidirectional channels retain their independent credits/queues.
 
-`UsbProxy.state` protects channel state, credit counters and scheduling decisions.
-Outgoing channel queues and management/request containers also use bounded or
-concurrent collections. The reader's parser is confined to its own thread after
-initial reset.
+No Android FEC timer or feedback worker remains. P4 receiver deadlines and
+feedback run regardless of Android connection or Ethernet subscribers. Radio
+FEC does not cover P4 output-queue or later USB/Ethernet packet drops.
 
-A `Lease` owns a received byte array and one receive slot. `Lease.close()` is
-idempotent and returns that credit while the session/channel is active. If a
-handler processes synchronously, release in `finally`. If it passes the packet
-to another consumer, transfer the lease and release it there. Copying bytes into
-an unbounded queue and immediately releasing the lease defeats memory bounds.
+## Native/decoder contract
 
-`VideoReceiver.onPacket()` synchronizes native access and releases its lease in
-`finally`. `onClose()` clears its channel reference; it does not free the decoder
-or native object. The Activity must separately call `VideoReceiver.close()`.
+Native Receiver validates input size, uses pinned `rtp_h264_depacketizer`, and
+returns completed Annex-B access units with keyframe status and nominal-30-fps
+PTS. Feed/destruction are serialized by Java; the native receiver is not
+independently thread-safe. Native callback JNIEnv and jobject are valid only
+inside that call and must never be retained for another thread.
 
-## Video path
-
-1. The USB parser yields one channel-0 DATA payload containing one vstreamer wire
-   datagram. This is not a raw Annex-B frame or an RTP packet yet.
-2. `Receiver::ingest()` enforces the 1445-byte input cap, parses the vstreamer
-   stream header and rejects non-media/empty/malformed inputs.
-3. It counts wire datagrams/bytes and forward sequence gaps. For FEC records it
-   passes the shard to `vstreamer::rs_block_erasure`; for raw mode it passes the
-   enclosed payload onward directly.
-4. Recovered SDUs are RTP datagrams. `rtp_h264_depacketizer` reconstructs Annex-B
-   H.264 access units, including fragmented NAL units.
-5. Completed AUs call the Java `onAccessUnit(byte[], long, boolean)` method.
-6. The Java side waits for an initial keyframe. It submits the AU to MediaCodec
-   when an input buffer is available; decoder output is rendered onto a Surface.
-
-The library integrates selected vstreamer core files rather than building its
-Linux/SDL application or full `stream_receiver` component. Do not add an Android
-UDP loopback bridge just to feed the existing desktop receiver component.
-
-Current decode assumptions and behavior:
-
-- H.264 `video/avc`, configured initially as 1920x1080.
-- Nominal 30 fps; native AU PTS conversion uses that rate.
-- Maximum codec input buffer request is 4 MiB.
-- API 30+ requests MediaCodec low-latency mode.
-- `createDecoderByType()` selects the platform default; hardware acceleration
-  is not explicitly selected or verified.
-- Input dequeue waits up to 10 ms. If no buffer is available or an AU does not
-  fit, the receiver waits for another keyframe before resuming input.
-- Java clamps PTS to increase monotonically. Frame-rate changes, RTP timestamp
-  wrap and stream restart timing need targeted validation.
-- Output codec errors are currently logged; they are not consistently propagated
-  to the Activity or followed by automatic decoder recovery.
-
-## FEC deadlines and feedback
-
-The 20 ms timer calls `Receiver::tick()` even during input silence, allowing
-FEC receive deadlines to release packets without waiting for another datagram.
-Every 100 ms it also requests a link report. No report is sent before the first
-valid stream-media datagram. After media has started, reports may continue
-through a period of silence, matching the receiver's persistent session state.
-
-The report is a vstreamer non-media stream record (4-byte stream header plus a
-64-byte link-report payload). It is enqueued on channel 0 with `trySend()` and
-travels through P4/L3 to the rover's video upstream. These reports use their own
-receiver session/sequence; those values are independent of USB session IDs and
-USB record sequence counters.
-
-Historical counter names contain `udp`, but here they count vstreamer datagrams
-delivered through USB. Their gaps can include radio loss and proxy queue loss;
-they do not isolate the cause. L3/P4 counters are needed to distinguish layers.
-`trySend()` failure can drop a feedback report; the current app does not retry
-or expose a separate feedback-drop UI counter.
-
-## JNI lifetime contract
-
-Java owns a native pointer returned by `nativeCreate(int session)` and releases
-it once through `nativeDestroy(long)`. Feed, tick and destruction are serialized
-by the Java monitor. Native receiver/FEC/depay objects are not independently
-thread-safe and must not be called concurrently.
-
-| Java native entry | Role |
+| JNI entry | Purpose |
 | --- | --- |
-| `nativeCreate(int)` | Allocate state and locate `onAccessUnit` callback |
-| `nativeFeed(long, byte[])` | Copy the datagram and run stream/FEC/RTP receive work |
-| `nativeTick(long, boolean)` | Expire FEC state, deliver AUs, optionally return feedback |
-| `nativeDestroy(long)` | Destroy receiver state after feed/tick are quiescent |
+| `nativeCreate()` | Allocate depay state and resolve onAccessUnit |
+| `nativeFeed(long, byte[])` | Copy one RTP packet and deliver completed AUs |
+| `nativeDestroy(long)` | Free state after feeds are quiescent |
 
-Native callbacks run synchronously inside feed/tick. The stored `JNIEnv*` and
-owner object are valid only for that JNI call; they are not global references
-for another native thread. The callback signature is `([BJZ)V`. Changes to Java
-method names/signatures or to minification require matching JNI/keep-rule work.
+C++ exceptions become IllegalStateException. The decoder starts as H.264
+1920x1080, requests a 4 MiB input buffer and API-30+ low latency, and uses
+createDecoderByType. Hardware acceleration is not explicitly selected/verified.
+Java waits for a keyframe initially and after input-buffer starvation; PTS is
+clamped monotonically. RTP depay handles fragmented NALs and packet gaps.
 
-C++ exceptions become Java `IllegalStateException`. Audit pending Java exceptions,
-method lookup/allocation failure and partial construction when improving this
-bridge. Host core tests do not execute JNI or MediaCodec.
+Known limits still need device work: SPS/PPS and resolution changes, timestamp
+wrap/restarts, codec construction failure cleanup, output errors, lifecycle
+concurrency, and sustained CPU/thermal/latency behavior. There is no automatic
+recovery from every codec error or USB failure. Host tests use synthetic NALs;
+they do not prove MediaCodec playback on a phone.
 
-## Extending application channels
+## Extending channels
 
-Android uses `registerHandler(int id, Handler handler)` before connect. IDs are
-validated as 0..65535; a Kotlin caller can use `someUShort.toInt()`. The returned
-Channel provides `open(window)` and bounded `trySend(payload)`. Exactly one local
-handler owns an ID; the registry limit is 16. The P4 must register the matching
-L3-created transport before Android connects.
-
-Do not register MSP placeholders in the current app: discovery rejects a local
-handler absent from the P4. Before implementing MSP, specify payload boundaries,
-versions, MTU, role/direction, remote L3 routing and application acknowledgement
-semantics. These are still TBA; the USB channel number alone defines none of them.
+Use registerHandler with a validated 0..65535 Java int before connect. Each
+registered ID must exist on P4; no optional absent registration is supported.
+A handler may declare a required format; format validation happens in OPEN.
+The P4 USB proxy can still accept real L3-created UpstreamQueue handles for
+unprocessed bidirectional services. Video instead binds a local processed
+source, while its receiver consumes the actual L3 video transport.

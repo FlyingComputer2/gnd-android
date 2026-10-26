@@ -18,7 +18,7 @@ Coordinate changes across both repositories.
 | Bulk IN | `0x81`, P4 → Android |
 | P4 connector | High Speed USB, USB3 on Guition board schematic |
 | Channel type | Unsigned 16-bit, entire range 0..65535 |
-| Channel 0 | Video datagrams and reverse receiver reports |
+| Channel 0 | Receive-only RTP H.264, format `rtp-h264-v1` |
 | Channel 1 | MSP DisplayPort, TBA |
 | Channel 2 | MSP RC telemetry, TBA |
 
@@ -53,7 +53,7 @@ All multi-byte fields are little endian. There is no alignment padding.
 | CREDIT | 5 | Exactly two bytes: uint16 slots released; sequence zero |
 
 Hard payload cap: 2048 bytes. Management cap: 1024 bytes. Video DATA must fit
-the OPEN reply MTU, currently 1445 bytes. The native receiver also hard-codes
+the OPEN reply MTU, currently 1445 bytes. The RTP receiver also caps input at
 1445; raising the USB cap does not raise that receiver limit. Application DATA
 is not split/reassembled at this layer. Over-MTU application sends fail locally.
 
@@ -133,7 +133,8 @@ Other operations require a successful HELLO.
 ```
 
 The P4 accepts offsets 0..16 and limits 1..4. It returns `channels` entries with
-`id`, `name`, `max_payload`, `ready`, and `next_offset` (null at the end).
+`id`, `name`, `max_payload`, `ready`, `read_only`, optional `format`, and
+`next_offset` (null at the end).
 Android discovers every page, then checks all locally registered IDs are in the
 remote set. It does not currently expose the full descriptor list in its UI or
 retain all readiness metadata. Do not locally register MSP IDs before their
@@ -148,7 +149,11 @@ remote transports exist: discovery will reject that connection.
 `rx_window` is Android's available P4→Android DATA slots, in 1..16. P4 replies
 with `channel`, its opposite-direction `rx_window` (currently 8), and
 `max_payload` (video 1445). Android applies these limits and marks the channel
-open on the reader before processing any following DATA.
+open on the reader before processing any following DATA. Before marking video
+open, Android requires `format:"rtp-h264-v1"`. P4 also replies `read_only:true`.
+Android rejects DATA sends on read-only channels. P4 invalidates the session if
+it receives DATA for this source. Reverse video feedback is generated on P4.
+Missing/mismatched format fails OPEN; update both peers together.
 
 P4 requires a registered and connected L3 app transport. It drains pre-open
 backlog and emits the successful reply before that channel's DATA. An ID cannot
@@ -210,27 +215,29 @@ a partial record must finish. This is packet round-robin, not byte-based deficit
 scheduling or guaranteed channel bandwidth. Whole-endpoint host stalls affect
 all channels despite independent credits.
 
-## P4/L3 contract
+## P4/L3 and video contract
 
-L3 owns radio/MPDU/FEC routing and creates an `UpstreamQueue` for queue app
-transport. P4's `cfg.on_upstream_queue` receives that object and registers it:
+L3 creates/owns UpstreamQueue for a queue app transport. Its creation callback
+passes the actual video object to `ground_video_start()`. The video service
+bridges that transport into the stock UDP-only stream_receiver on P4 loopback.
+The receiver removes stream headers, recovers FEC and returns feedback through
+L3. Its recovered RTP is independently queued for Ethernet multicast and USB 0.
 
-```cpp
-usb_upstream_register(uint16_t{0}, "video", video_upstream);
-```
+USB channel 0 is registered as a local processed packet source, not as another
+L3 transport. Other channels may still register real L3-owned objects directly.
+Do not fabricate app-created raw queue pairs or aliases as L3 UpstreamQueue.
+L3 disconnects retained handles at teardown. No automatic manager restart exists.
 
-The proxy takes a shared handle to the actual L3 app object. L3 disconnects it
-on teardown; retained handles remain memory-valid and reject sends. Android
-uses a local handler with the same USB ID. An app-created raw queue pair or a
-USB-defined `using UpstreamQueue = ...` alias is not this architecture.
+One channel-0 DATA contains one RTP H.264 datagram with original sequence,
+timestamp and extensions, at most 1445 bytes. No stream header/FEC envelope or
+Annex-B AU is present. P4 advertises `rtp-h264-v1` and `read_only:true` in LIST
+and OPEN. Android depayloads RTP and displays via MediaCodec. USB record version
+remains 2; video payload compatibility is explicit and changes with both peers.
+Old app/firmware combinations are incompatible. FEC ends before USB/Ethernet
+fanout, so it cannot repair packet loss introduced after that boundary.
 
-The peer currently pins L3 `fb3eea11d3edc81ce39287a8fd5c77e3d43d41f1` and applies
-[a compatibility patch](https://github.com/FlyingComputer2/rover-ground-esp32p4/blob/5ca7857268102200e8ef225f5cd914438864366a/patches/winject-l3-upstream-queue.patch)
-to create/publish this object. Preserve or deliberately replace that API when
-updating L3. The P4 has no automatic L3 restart/rebinding implementation.
-
-Ground video uses L3 upstream index 1, TX bus d4, RX bus c3, domain 0xB00B,
-air channel 1, OFDM_24M, power 15 dBm and no manager FEC. USB ID 0 is independent
-of that upstream index and of the air channel number. The P4 reaches its local
-radio proxy over UDP 22/9000 and binds its manager console to 127.0.0.1:2400.
-A second external Ethernet L3 manager must not take the same radio peer role.
+Ground video remains L3 index 1, TX d4, RX c3, domain 0xB00B, channel 1,
+OFDM_24M, 15 dBm and no manager FEC. L3 pins and compatibility patch remain
+unchanged. Radio proxy is local UDP 22/9000; manager console 127.0.0.1:2400.
+P4 multicast is 239.255.42.1:5600 (RTP payload 96, H264/90000, TTL 1), enabled
+when Ethernet has IPv4. USB video requires no Ethernet cable or DHCP lease.

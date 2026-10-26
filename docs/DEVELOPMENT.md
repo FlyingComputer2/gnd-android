@@ -16,8 +16,6 @@
 | Android CMake | 3.22.1 |
 | JUnit | 4.13.2 |
 | vstreamer | f4044615fe6857dc1a7dd3fdb8704b492d618caf |
-| BFC | 6c02a495d1a2cf4a8a13dfa6b25b342780527c89 |
-| ISA-L | v2.31.1 release tag |
 
 Read [app/build.gradle](../app/build.gradle), [root Gradle](../build.gradle) and
 [native CMake](../app/src/main/cpp/CMakeLists.txt) before changing versions.
@@ -25,8 +23,8 @@ There is no checked-in Gradle wrapper in this baseline; commands use `gradle`.
 AndroidX is disabled and the initial Activity uses platform widgets.
 
 CMake fetches source over HTTPS and populates dependencies without configuring
-the full desktop vstreamer project. `receiver_core` uses portable ISA-L C and
-vstreamer's scalar erasure-code implementation, not the optional NEON path.
+the full desktop vstreamer project. `receiver_core` compiles only RTP depay; BFC/ISA-L and FEC are no longer
+Android dependencies. P4 owns those parts.
 JNI builds as `librover_receiver.so`; host tests build `receiver_test` instead.
 
 ## Reproduce the Android build
@@ -74,9 +72,7 @@ To use existing pinned source checkouts without network fetches:
 ```sh
 cmake -S app/src/main/cpp -B native-build \
   -DROVER_NATIVE_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \
-  -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=/absolute/path/to/vstreamer \
-  -DFETCHCONTENT_SOURCE_DIR_BFC=/absolute/path/to/BFC \
-  -DFETCHCONTENT_SOURCE_DIR_ISAL=/absolute/path/to/isa-l
+  -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=/absolute/path/to/vstreamer
 ```
 
 Verify checkout revisions and dirty state before using overrides. A passing
@@ -90,7 +86,7 @@ Use a separate build directory when changing toolchains or dependency overrides.
 | `WireTest.goldenAndEverySplit` | Shared C++/Java golden bytes and every two-part split for representative u16 IDs | Real USB transfers or scheduling |
 | `maximumPayloadAndHighSessionBytewise` | 2048-byte payload, bytewise feed, high-bit session and channel | Phone throughput/GC behavior |
 | Other `WireTest` cases | Channel-0 DATA vs REPLY, stale sessions, invalid channel/length | Management futures, credits and close concurrency |
-| `receiver_test` | Fragmented synthetic IDR, deliberate RS shard loss, byte-identical AU recovery, counters/feedback and pre-media suppression | A decoder accepting a real encoded video stream |
+| `receiver_test` | Fragmented RTP, byte-identical IDRs, timestamps and malformed/legacy rejection | A decoder accepting a real encoded video stream |
 | Android assemble | Java/JNI compilation, dependency fetch/link and APK packaging | Installation, permission dialog, Surface or MediaCodec runtime |
 | P4 peer host/CI tests | Direct app transport binding, u16 wire agreement, credit isolation and reset/error paths | Real P4 resource usage or live phone interoperability |
 
@@ -102,7 +98,7 @@ For changes, select checks by affected layer:
 
 - Wire/session/credits: JVM codec tests, new transport-state tests where needed,
   and matching P4 protocol/service tests if the shared contract changes.
-- Native FEC/RTP/timestamps/feedback: portable native tests plus Android assemble.
+- Native RTP/timestamps: portable native tests plus Android assemble.
 - JNI, Java types, package or Gradle changes: Android JVM tests and APK assemble.
 - Decoder/lifecycle/UI: APK build plus targeted device/instrumentation checks;
   codec behavior cannot be established by the portable test.
@@ -171,8 +167,8 @@ on an authorized bench and record observations rather than assuming success.
    0 and MSP IDs are absent. The initial status text only reports connection.
 4. Start a matching rover stream. Confirm an actual moving image on the Surface,
    decoder name/output format and continued display for at least 10 minutes.
-5. Verify reverse link reports reach the rover sender. Reports should be absent
-   before valid media, then appear approximately every 100 ms when capacity allows.
+5. Verify P4 reverse link reports reach the rover sender independently of USB.
+   Verify simultaneous Ethernet multicast playback and isolation when USB stalls.
 6. Exercise denied permission, unplug/replug, app reopen without replug, Surface
    loss/recreation and foreground/background transitions. Repeat reconnects and
    inspect thread count, memory growth, native crashes and leaked USB claims.
@@ -188,7 +184,7 @@ on an authorized bench and record observations rather than assuming success.
    declaring RC/telemetry acceptable; none has been agreed in this baseline.
 
 Measure latency using a valid clock relationship or a physical visual method.
-Native monotonic report times, RTP timestamps and remote capture clocks cannot
+P4 monotonic report times, RTP timestamps and remote capture clocks cannot
 be subtracted arbitrarily to claim end-to-end latency.
 
 ## Troubleshooting
@@ -202,9 +198,9 @@ be subtracted arbitrarily to claim end-to-end latency.
 | No P4 upstream for channel | Handler ID vs LIST; MSP placeholders must not be registered yet |
 | OPEN backend-not-ready | L3-created queue registration/readiness, P4 manager status |
 | Connected but no video | Rover sender, buses/domain/radio, USB credits, vstreamer MTU/version, keyframe and decoder logs |
-| Video stalls after some packets | Leaked leases, zero credits, handler backlog, FEC deadlines, codec input starvation |
+| Video stalls after some packets | Leaked leases, zero credits, handler backlog, P4 receiver/branch drops, codec input starvation |
 | Black Surface with incoming AUs | MediaCodec configuration/SPS/PPS/keyframes, actual resolution, Surface validity, decoder error logs |
-| Reports absent | No valid media yet, timer failure, sender handle, full outgoing queue or wrong reverse bus |
+| Reports absent | P4 receiver has no valid media, bridge failure, L3 admission or wrong reverse bus |
 | Crash on exit/reconnect | Native pointer lifetime, queued callbacks, executor shutdown, codec partial construction and Surface teardown |
 | Install update rejected | ABI/API compatibility and debug signing certificate mismatch |
 
