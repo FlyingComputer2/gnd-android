@@ -16,6 +16,13 @@ receiver, stream framing and RTP/H.264 depacketizer through JNI; Android
 runs on the ground P4. Upstream manager FEC is disabled for video, preserving
 vstreamer's end-to-end FEC.
 
+## Implementation handoff
+
+Start at [docs/README.md](docs/README.md). It links the architecture/source map,
+exact USB protocol, build/test and bench procedures, and an ordered agent
+handoff with known limitations and acceptance criteria. Coding agents should
+also read [AGENTS.md](AGENTS.md).
+
 ## Run
 
 Build/install the debug APK from the Actions artifact or Android Studio. Requires
