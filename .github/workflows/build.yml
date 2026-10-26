@@ -1,0 +1,22 @@
+name: Android and protocol checks
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      - run: gradle testDebugUnitTest assembleDebug --stacktrace
+      - run: cmake -S app/src/main/cpp -B native-build -DROVER_NATIVE_TESTS=ON && cmake --build native-build -j 2 && ctest --test-dir native-build --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rover-ground-android-debug
+          path: app/build/outputs/apk/debug/*.apk
