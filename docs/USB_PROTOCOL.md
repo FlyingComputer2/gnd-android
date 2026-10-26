@@ -4,7 +4,7 @@ This describes the implemented transport baseline, not a proposed network
 adapter. Source authorities are [Wire.java](../app/src/main/java/com/flyingcomputer/roverground/Wire.java),
 [UsbProxy.java](../app/src/main/java/com/flyingcomputer/roverground/UsbProxy.java),
 and the P4 peer's
-[protocol/service specification](https://github.com/FlyingComputer2/rover-ground-esp32p4/blob/5ca7857268102200e8ef225f5cd914438864366a/docs/usb-upstream-proxy.md).
+[protocol/service specification](https://github.com/FlyingComputer2/rover-ground-esp32p4/blob/feature/android-usb-radio/docs/usb-upstream-proxy.md).
 Coordinate changes across both repositories.
 
 ## USB identity and channel namespace

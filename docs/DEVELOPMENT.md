@@ -64,8 +64,7 @@ ctest --test-dir native-build --output-on-failure
 
 Use Debug/default assertion-enabled test builds. `receiver_test.cpp` currently
 uses `assert` for checks and some setup calls; building that executable with
-NDEBUG can remove verification/setup. The library itself intentionally defines
-NDEBUG for its portable sources; do not confuse that with disabling test checks.
+NDEBUG can remove verification/setup. Keep assertion-enabled native test builds.
 
 To use existing pinned source checkouts without network fetches:
 
@@ -140,8 +139,8 @@ edit` failed on a deprecated GraphQL field; REST PR updates worked instead.
 
 The peer repository is
 [FlyingComputer2/rover-ground-esp32p4](https://github.com/FlyingComputer2/rover-ground-esp32p4).
-The matching initial implementation is in PR #1 / commit 5ca7857, not the old
-radio-only v1 bridge. It uses ESP-IDF 5.5.5, pinned L3 and the UpstreamQueue patch.
+The matching receiver implementation is in PR #1, starting at commit 41d182e.
+Older commit 5ca7857 forwards encapsulated video and is incompatible. It uses ESP-IDF 5.5.5, pinned L3 and the UpstreamQueue patch.
 Follow that repository's board/build instructions for any authorized flash.
 
 Required integration settings: USB channel 0 video; ground video L3 index 1;

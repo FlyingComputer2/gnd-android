@@ -124,15 +124,15 @@ Inspection concerns to evaluate:
 
 Acceptance: deterministic cleanup under construction failure, Surface loss,
 codec error and repeated reconnect; meaningful UI/error events; device tests
-with the actual rover stream. Keep FEC/packet processing off the USB reader.
+with the actual rover stream. Keep packet/depay processing off the USB reader.
 
 ### 4. Expose useful measurements before optimizing
 
 Add bounded/sampled diagnostics for RTP ingress, reconstructed access units,
 P4 FEC recovery and residual loss, parser/session errors, queue occupancy/drops,
 credit stalls, feedback enqueue failures, AUs and decode/render counts.
-Separate transport, FEC and display loss; historical `udp` names in native
-counters represent USB-delivered stream datagrams here.
+Separate P4 radio/FEC loss, P4 output-queue loss, Android RTP/depay loss and
+decoder/display loss. P4 stock receiver counters retain historical `udp` names.
 
 Measure first. Android no longer builds erasure code; P4 receive performance must be measured
 before changing its portable scalar implementation. The parser already
