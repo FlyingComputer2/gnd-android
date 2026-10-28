@@ -3,6 +3,7 @@ package com.flyingcomputer.roverground;
 import android.media.*;
 import android.os.Build;
 import android.view.Surface;
+import android.view.SurfaceView;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.*;
@@ -14,7 +15,9 @@ import java.util.concurrent.atomic.*;
  * Also measures, for the OSD, the channel-0 bitrate, the decoder's output frame rate and
  * camera-to-decode latency: the rover's packer stamps each frame's capture instant as
  * CLOCK_REALTIME (RTP header extension id 2), and latency is the ground P4's clock (via
- * SynchClient) when the decoder hands out the frame, minus that stamp.
+ * SynchClient) when the decoder hands out the frame, minus that stamp. On API 34+ the app
+ * presents frames itself (ScreenPresenter), and screen latency takes the same difference at the
+ * time the display showed the frame (the transaction's present fence).
  */
 public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     static { System.loadLibrary("rover_receiver"); }
@@ -33,11 +36,23 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     private boolean packetMarker;
     // Capture ns by the PTS the AU was queued with, until the decoder outputs it.
     private final ConcurrentHashMap<Long,Long> captureByPts=new ConcurrentHashMap<>();
+    // Capture ns by PTS for decoded frames, until the display presents them (API 34+).
+    private final ConcurrentHashMap<Long,Long> captureByScreenPts=new ConcurrentHashMap<>();
+    private final ScreenPresenter presenter;
+    private final AtomicLong screenSumUs=new AtomicLong(), screenCount=new AtomicLong();
     private final AtomicLong bytes=new AtomicLong(), frames=new AtomicLong();
     private final AtomicLong latencySumUs=new AtomicLong(), latencyCount=new AtomicLong();
     private long statsAtNs=System.nanoTime(), statsBytes, statsFrames;
-    public VideoReceiver(Surface surface,SynchClient clock) throws Exception {
+    public VideoReceiver(SurfaceView view,SynchClient clock) throws Exception {
         this.clock=clock;
+        Surface surface;
+        if(Build.VERSION.SDK_INT>=34) {
+            presenter=new ScreenPresenter(view.getSurfaceControl(),view.getWidth(),view.getHeight(),this::onPresented);
+            surface=presenter.surface();
+        } else {
+            presenter=null;
+            surface=view.getHolder().getSurface();
+        }
         MediaFormat format=MediaFormat.createVideoFormat("video/avc",1920,1080);
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,4*1024*1024);
         if(Build.VERSION.SDK_INT>=30) format.setInteger(MediaFormat.KEY_LOW_LATENCY,1);
@@ -90,22 +105,39 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         frames.incrementAndGet();
         Long capture=captureByPts.remove(pts);
         long server=clock.serverNowUs();
-        if(capture==null || server==Long.MIN_VALUE) return;
+        if(capture==null) return;
+        if(presenter!=null) {
+            if(captureByScreenPts.size()>64) captureByScreenPts.clear(); // frames never presented
+            captureByScreenPts.put(pts,capture);
+        }
+        if(server==Long.MIN_VALUE) return;
         long us=server-capture/1000;
         if(us<0 || us>10_000_000) return;
         latencySumUs.addAndGet(us); latencyCount.incrementAndGet();
     }
-    /** One stats window: the OSD's numbers and counters. latencyMs is -1 without capture times. */
-    public record Window(long kbps,double latencyMs,double fps,long latencyFrames,long frames,long bytes) {
-        /** OSD text: "<kbps> kbps, <latency.xxx> ms, <fps> fps". */
+    // presentNs: when the display showed the frame (System.nanoTime() domain), mapped onto the
+    // ground P4's clock through the current offset.
+    private void onPresented(long ptsUs,long presentNs) {
+        Long capture=captureByScreenPts.remove(ptsUs);
+        long server=clock.serverNowUs();
+        if(capture==null || server==Long.MIN_VALUE) return;
+        long us=server-(System.nanoTime()-presentNs)/1000-capture/1000;
+        if(us<0 || us>10_000_000) return;
+        screenSumUs.addAndGet(us); screenCount.incrementAndGet();
+    }
+    /** One stats window: the OSD's numbers and counters. latencyMs / screenMs are -1 without data. */
+    public record Window(long kbps,double latencyMs,double fps,long latencyFrames,long frames,long bytes,
+                         double screenMs,long screenFrames) {
+        /** OSD text: "<kbps> kbps, <latency.xxx> ms, <fps> fps[, screen <ms> ms]". */
         public String osd() {
             String latency=latencyMs>=0 ? String.format(Locale.US,"%.3f",latencyMs) : "---";
-            return String.format(Locale.US,"%d kbps, %s ms, %.1f fps",kbps,latency,fps);
+            String text=String.format(Locale.US,"%d kbps, %s ms, %.1f fps",kbps,latency,fps);
+            return screenMs>=0 ? text+String.format(Locale.US,", screen %.1f ms",screenMs) : text;
         }
         /** key=value log line, in place of screenshots. */
         public String log(SynchClient clock) {
-            return String.format(Locale.US,"kbps=%d latency_ms=%.3f fps=%.2f latency_frames=%d frames=%d bytes=%d sync_delay_us=%d",
-                kbps,latencyMs,fps,latencyFrames,frames,bytes,clock.delayUs());
+            return String.format(Locale.US,"kbps=%d latency_ms=%.3f screen_latency_ms=%.3f fps=%.2f latency_frames=%d screen_frames=%d frames=%d bytes=%d sync_delay_us=%d",
+                kbps,latencyMs,screenMs,fps,latencyFrames,screenFrames,frames,bytes,clock.delayUs());
         }
     }
     /** Closes the window since the previous call. */
@@ -115,8 +147,9 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         long kbps=Math.round((b-statsBytes)*8/1000.0/s);
         double fps=(f-statsFrames)/s;
         long n=latencyCount.getAndSet(0), sum=latencySumUs.getAndSet(0);
+        long sn=screenCount.getAndSet(0), ssum=screenSumUs.getAndSet(0);
         statsAtNs=now; statsBytes=b; statsFrames=f;
-        return new Window(kbps,n>0 ? sum/1000.0/n : -1,fps,n,f,b);
+        return new Window(kbps,n>0 ? sum/1000.0/n : -1,fps,n,f,b,sn>0 ? ssum/1000.0/sn : -1,sn);
     }
     // Called on the serialized native feed path. Never on the USB reader.
     private void onAccessUnit(byte[] annexB,long pts,boolean key) {
@@ -143,6 +176,7 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         }
         try { output.join(1000); } catch(InterruptedException e) { Thread.currentThread().interrupt(); }
         decoder.stop(); decoder.release();
+        if(presenter!=null) presenter.close();
     }
     private native long nativeCreate();
     private native void nativeFeed(long handle,byte[] bytes);

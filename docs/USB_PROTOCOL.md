@@ -266,6 +266,15 @@ second:
   RTP header extension id 2. This is the mean over the second, `---` before
   the clock syncs.
 - Decoder output fps.
+- `screen <ms> ms` (Android 14+): camera-to-screen latency, the same
+  difference taken when the display showed the frame. The app presents frames
+  itself: MediaCodec decodes into an `ImageReader`, and each frame's buffer goes
+  onto a child `SurfaceControl` of the SurfaceView in one transaction. The
+  transaction's present fence signals when SurfaceFlinger put that frame on
+  screen; its signal time (`CLOCK_MONOTONIC`) is mapped onto the P4 clock. The
+  panel's own response time is not included. `MediaCodec`'s
+  `OnFrameRenderedListener` is not used: on the test phone it reports the
+  requested render time, not the display time.
 
 The accuracy of the latency figure rests on three things:
 - The rover's sync to the ground: rtt measured −3 to +2 ms under video, the
@@ -277,11 +286,11 @@ The same numbers go to logcat once a second, tag `RoverOSD`, as key=value.
 Read these instead of screenshots:
 
 ```text
-kbps=6023 latency_ms=85.681 fps=29.90 latency_frames=30 frames=12345 bytes=… sync_delay_us=812
+kbps=6023 latency_ms=85.681 screen_latency_ms=101.240 fps=29.90 latency_frames=30 screen_frames=30 frames=12345 bytes=… sync_delay_us=812
 ```
 
-`latency_ms=-1.000` means no frame in the second had a capture time, or the
-clock had not synced. `sync_delay_us` is the round trip of the USB sync
+`latency_ms=-1.000` (`screen_latency_ms=-1.000`) means no frame decoded
+(rendered) in the second had a capture time, or the clock had not synced. `sync_delay_us` is the round trip of the USB sync
 exchange the offset came from.
 
 An app that registers channel 3 needs firmware that lists it; discovery rejects

@@ -94,7 +94,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
             show("Connecting to P4…"); currentDevice=device.getDeviceId();
             try {
                 clock=new SynchClient();
-                video=new VideoReceiver(view.getHolder().getSurface(),clock);
+                video=new VideoReceiver(view,clock);
                 proxy=new UsbProxy(error->submit(()->{ disconnect(); show("USB error: "+error.getMessage()); }));
                 UsbProxy.Channel channel=proxy.registerHandler(0,video);
                 UsbProxy.Channel sync=proxy.registerHandler(SynchClient.CHANNEL,clock);

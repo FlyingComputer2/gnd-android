@@ -32,6 +32,7 @@ No MSP proxy, USB network adapter, RTSP server or recording UI is implemented.
 | `UsbProxy.java` | Handler registration, management, format validation, credits and bounded queues |
 | `Wire.java` | RGP4 v2 codec/parser; unsigned 16-bit channel IDs |
 | `VideoReceiver.java` | Channel-0 handler, synchronized JNI lifetime, MediaCodec input/output |
+| `ScreenPresenter.java` | Android 14+: presents decoded frames via `SurfaceControl` and reports each frame's display time |
 | `receiver.cpp` / `receiver.hpp` | Portable RTP/H.264 depayloading and AU callback |
 | `jni.cpp` | Synchronous JNI feed and Annex-B callback |
 | `app/src/main/cpp/CMakeLists.txt` | Pinned vstreamer RTP source; JNI or native-test target |
@@ -86,6 +87,11 @@ inside that call and must never be retained for another thread.
 C++ exceptions become IllegalStateException. The decoder starts as H.264
 1920x1080, requests a 4 MiB input buffer and API-30+ low latency, and uses
 createDecoderByType. Hardware acceleration is not explicitly selected/verified.
+On Android 14+ the decoder outputs to `ScreenPresenter` (an `ImageReader`
+whose frames go onto a child `SurfaceControl` of the SurfaceView, scaled to
+fill it, one transaction per frame) so each frame's present fence gives its
+display time for the OSD's `screen` latency; older versions decode straight
+into the SurfaceView.
 Java waits for a keyframe initially and after input-buffer starvation; PTS is
 clamped monotonically. RTP depay handles fragmented NALs and packet gaps.
 
