@@ -257,17 +257,14 @@ and `read_only:false`. MTU is 64.
 | `sync_response` | `02`, u32 trid, i64 server_time_us |
 
 The phone keeps its offset to the P4 clock against `elapsedRealtime`, from the
-lowest-delay exchange of the last eight. The OSD (top left) shows, once a
-second:
+lowest-delay exchange of the last eight. The OSD (top left) shows, once a second, `<kbps> kbps, <fps> fps, <ms> ms`:
 
 - Channel-0 kbps.
-- Camera-to-decode latency: the P4 clock when `MediaCodec` outputs a frame,
-  minus the capture `CLOCK_REALTIME` the rover's packer wrote into that frame's
-  RTP header extension id 2. This is the mean over the second, `---` before
-  the clock syncs.
 - Decoder output fps.
-- `screen <ms> ms` (Android 14+): camera-to-screen latency, the same
-  difference taken when the display showed the frame. The app presents frames
+- Camera-to-screen (glass) latency, Android 14+: the P4 clock when the display
+  showed a frame, minus the capture `CLOCK_REALTIME` the rover's packer wrote
+  into that frame's RTP header extension id 2; the mean over the second, `---`
+  before the clock syncs (and on older Android). The app presents frames
   itself: MediaCodec decodes into an `ImageReader`, and each frame's buffer goes
   onto a child `SurfaceControl` of the SurfaceView in one transaction. The
   transaction's present fence signals when SurfaceFlinger put that frame on
@@ -275,6 +272,9 @@ second:
   panel's own response time is not included. `MediaCodec`'s
   `OnFrameRenderedListener` is not used: on the test phone it reports the
   requested render time, not the display time.
+
+The log also keeps camera-to-decode latency (`latency_ms`): the same
+difference taken when `MediaCodec` outputs the frame.
 
 The accuracy of the latency figure rests on three things:
 - The rover's sync to the ground: rtt measured −3 to +2 ms under video, the

@@ -128,11 +128,10 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     /** One stats window: the OSD's numbers and counters. latencyMs / screenMs are -1 without data. */
     public record Window(long kbps,double latencyMs,double fps,long latencyFrames,long frames,long bytes,
                          double screenMs,long screenFrames) {
-        /** OSD text: "<kbps> kbps, <latency.xxx> ms, <fps> fps[, screen <ms> ms]". */
+        /** OSD text: "<kbps> kbps, <fps> fps, <camera-to-screen> ms" ("---" until known). */
         public String osd() {
-            String latency=latencyMs>=0 ? String.format(Locale.US,"%.3f",latencyMs) : "---";
-            String text=String.format(Locale.US,"%d kbps, %s ms, %.1f fps",kbps,latency,fps);
-            return screenMs>=0 ? text+String.format(Locale.US,", screen %.1f ms",screenMs) : text;
+            String glass=screenMs>=0 ? String.format(Locale.US,"%.1f",screenMs) : "---";
+            return String.format(Locale.US,"%d kbps, %.1f fps, %s ms",kbps,fps,glass);
         }
         /** key=value log line, in place of screenshots. */
         public String log(SynchClient clock) {
