@@ -17,6 +17,21 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     private volatile boolean surfaceReady;
     private UsbProxy proxy;
     private VideoReceiver video;
+    private SynchClient clock;
+    private TextView osd;
+    private final Handler ui=new Handler(Looper.getMainLooper());
+    private final Runnable osdTick=new Runnable() {
+        @Override public void run() {
+            VideoReceiver v=video;
+            SynchClient c=clock;
+            if(v!=null && c!=null) {
+                VideoReceiver.Window w=v.window();
+                osd.setText(w.osd());
+                android.util.Log.i("RoverOSD",w.log(c)); // key=value, once a second
+            } else osd.setText("");
+            ui.postDelayed(this,1000);
+        }
+    };
     private volatile int currentDevice=-1;
     private final BroadcastReceiver events=new BroadcastReceiver() {
         @Override public void onReceive(Context context,Intent intent) {
@@ -35,18 +50,28 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         manager=(UsbManager)getSystemService(USB_SERVICE);
         FrameLayout root=new FrameLayout(this);
         view=new SurfaceView(this); view.getHolder().addCallback(this); root.addView(view);
+        osd=new TextView(this); osd.setTextColor(0xffffffff); osd.setTextSize(16);
+        osd.setTypeface(android.graphics.Typeface.MONOSPACE); osd.setShadowLayer(3,1,1,0xff000000);
+        osd.setPadding(16,12,16,12);
+        root.addView(osd,new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.START));
+        // Below the status bar / cutout.
+        root.setOnApplyWindowInsetsListener((v,insets)->{
+            osd.setPadding(16+insets.getSystemWindowInsetLeft(),12+insets.getSystemWindowInsetTop(),16,12);
+            return insets;
+        });
         LinearLayout controls=new LinearLayout(this); controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(20,12,20,12); controls.setBackgroundColor(0x99000000);
         status=new TextView(this); status.setTextColor(0xffffffff); controls.addView(status);
         Button connect=new Button(this); connect.setText("Connect USB"); connect.setOnClickListener(v->discover()); controls.addView(connect);
         TextView channels=new TextView(this); channels.setTextColor(0xffdddddd);
-        channels.setText("0 · Video     1 · MSP DisplayPort (TBA)     2 · MSP RC telemetry (TBA)"); controls.addView(channels);
+        channels.setText("0 · Video     1 · MSP DisplayPort (TBA)     2 · MSP RC telemetry (TBA)     3 · Sync"); controls.addView(channels);
         root.addView(controls,new FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM)); setContentView(root);
         IntentFilter filter=new IntentFilter(PERMISSION);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if(Build.VERSION.SDK_INT>=33) registerReceiver(events,filter,Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(events,filter);
         show("Connect P4 High Speed USB (USB3), then grant permission");
+        ui.post(osdTick);
     }
     private void submit(Runnable work) {
         try { setup.execute(work); }
@@ -68,23 +93,26 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
             if(!surfaceReady) return;
             show("Connecting to P4…"); currentDevice=device.getDeviceId();
             try {
-                video=new VideoReceiver(view.getHolder().getSurface());
+                clock=new SynchClient();
+                video=new VideoReceiver(view.getHolder().getSurface(),clock);
                 proxy=new UsbProxy(error->submit(()->{ disconnect(); show("USB error: "+error.getMessage()); }));
                 UsbProxy.Channel channel=proxy.registerHandler(0,video);
-                proxy.connect(manager,device); channel.open(8);
-                show("Video channel 0 connected");
+                UsbProxy.Channel sync=proxy.registerHandler(SynchClient.CHANNEL,clock);
+                proxy.connect(manager,device); channel.open(8); sync.open(2);
+                show("Video channel 0 and sync channel 3 connected");
             } catch(Exception e) { disconnect(); show("Connection failed: "+e.getMessage()); }
         });
     }
     private void disconnect() {
         if(proxy!=null) { proxy.close(); proxy=null; }
         if(video!=null) { video.close(); video=null; }
+        if(clock!=null) { clock.close(); clock=null; }
         currentDevice=-1;
     }
     @Override public void surfaceCreated(SurfaceHolder holder) { surfaceReady=true; discover(); }
     @Override public void surfaceChanged(SurfaceHolder holder,int format,int width,int height) {}
     @Override public void surfaceDestroyed(SurfaceHolder holder) { surfaceReady=false; submit(this::disconnect); }
     @Override public void onDestroy() {
-        unregisterReceiver(events); surfaceReady=false; submit(this::disconnect); setup.shutdown(); super.onDestroy();
+        ui.removeCallbacks(osdTick); unregisterReceiver(events); surfaceReady=false; submit(this::disconnect); setup.shutdown(); super.onDestroy();
     }
 }
