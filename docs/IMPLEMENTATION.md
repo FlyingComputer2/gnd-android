@@ -86,7 +86,13 @@ inside that call and must never be retained for another thread.
 
 C++ exceptions become IllegalStateException. The decoder starts as H.264
 1920x1080, requests a 4 MiB input buffer and API-30+ low latency, and uses
-createDecoderByType. Hardware acceleration is not explicitly selected/verified.
+createDecoderByType, with realtime priority and operating rate 240 (on the test
+phone the Exynos decoder otherwise took 12–20 ms per 1080p frame at 30 fps
+instead of ~5). Hardware acceleration is not explicitly selected/verified.
+UsbProxy keeps four 16 KiB IN requests queued (`UsbRequest`), so the bus is
+not idle between the P4's per-record transfers. The activity asks for the
+display's fastest refresh mode; Samsung's Motion smoothness setting can still
+cap it at 60 Hz.
 On Android 14+ the decoder outputs to `ScreenPresenter` (an `ImageReader`
 whose frames go onto a child `SurfaceControl` of the SurfaceView, scaled to
 fill it, one transaction per frame) so each frame's present fence gives its

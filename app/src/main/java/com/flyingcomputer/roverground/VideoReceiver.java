@@ -34,10 +34,21 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     };
     private long packetTs=-1, previousTs=-1;
     private boolean packetMarker;
-    // Capture ns by the PTS the AU was queued with, until the decoder outputs it.
-    private final ConcurrentHashMap<Long,Long> captureByPts=new ConcurrentHashMap<>();
-    // Capture ns by PTS for decoded frames, until the display presents them (API 34+).
-    private final ConcurrentHashMap<Long,Long> captureByScreenPts=new ConcurrentHashMap<>();
+    // One frame's capture time and its stage stamps (System.nanoTime()), for the log's
+    // per-stage latency: AU complete (its last USB packet), queued to the decoder, decoded.
+    private static final class Frame {
+        final long captureNs, auNs; long queuedNs, decodedNs;
+        Frame(long captureNs,long auNs) { this.captureNs=captureNs; this.auNs=auNs; }
+    }
+    // Frames by the PTS the AU was queued with, until the decoder outputs them.
+    private final ConcurrentHashMap<Long,Frame> captureByPts=new ConcurrentHashMap<>();
+    // Decoded frames by PTS, until the display presents them (API 34+).
+    private final ConcurrentHashMap<Long,Frame> captureByScreenPts=new ConcurrentHashMap<>();
+    // Stage sums for the window, µs: capture -> AU complete (P4 clock), AU -> queued,
+    // queued -> decoded, decoded -> presented.
+    private final AtomicLong arrivalUs=new AtomicLong(), arrivalN=new AtomicLong();
+    private final AtomicLong queueUs=new AtomicLong(), decodeUs=new AtomicLong(), stageN=new AtomicLong();
+    private final AtomicLong presentUs=new AtomicLong(), presentN=new AtomicLong();
     private final ScreenPresenter presenter;
     private final AtomicLong screenSumUs=new AtomicLong(), screenCount=new AtomicLong();
     private final AtomicLong bytes=new AtomicLong(), frames=new AtomicLong();
@@ -56,6 +67,11 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         MediaFormat format=MediaFormat.createVideoFormat("video/avc",1920,1080);
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,4*1024*1024);
         if(Build.VERSION.SDK_INT>=30) format.setInteger(MediaFormat.KEY_LOW_LATENCY,1);
+        // Realtime priority and a high operating rate (within the decoder's 1080p performance
+        // point) keep the decoder clocked up; at the 30 fps it is fed, it otherwise took 12-20 ms
+        // per frame instead of a few.
+        format.setInteger(MediaFormat.KEY_PRIORITY,0);
+        format.setInteger(MediaFormat.KEY_OPERATING_RATE,240);
         decoder=MediaCodec.createDecoderByType("video/avc");
         decoder.configure(format,surface,null,0); decoder.start();
         nativeHandle=nativeCreate();
@@ -103,31 +119,37 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     private long completedAuTs() { return packetMarker ? packetTs : previousTs; }
     private void onDecoded(long pts) {
         frames.incrementAndGet();
-        Long capture=captureByPts.remove(pts);
+        Frame frame=captureByPts.remove(pts);
         long server=clock.serverNowUs();
-        if(capture==null) return;
+        if(frame==null) return;
+        frame.decodedNs=System.nanoTime();
+        queueUs.addAndGet((frame.queuedNs-frame.auNs)/1000);
+        decodeUs.addAndGet((frame.decodedNs-frame.queuedNs)/1000);
+        stageN.incrementAndGet();
         if(presenter!=null) {
             if(captureByScreenPts.size()>64) captureByScreenPts.clear(); // frames never presented
-            captureByScreenPts.put(pts,capture);
+            captureByScreenPts.put(pts,frame);
         }
         if(server==Long.MIN_VALUE) return;
-        long us=server-capture/1000;
+        long us=server-frame.captureNs/1000;
         if(us<0 || us>10_000_000) return;
         latencySumUs.addAndGet(us); latencyCount.incrementAndGet();
     }
     // presentNs: when the display showed the frame (System.nanoTime() domain), mapped onto the
     // ground P4's clock through the current offset.
     private void onPresented(long ptsUs,long presentNs) {
-        Long capture=captureByScreenPts.remove(ptsUs);
+        Frame frame=captureByScreenPts.remove(ptsUs);
         long server=clock.serverNowUs();
-        if(capture==null || server==Long.MIN_VALUE) return;
-        long us=server-(System.nanoTime()-presentNs)/1000-capture/1000;
+        if(frame==null) return;
+        presentUs.addAndGet((presentNs-frame.decodedNs)/1000); presentN.incrementAndGet();
+        if(server==Long.MIN_VALUE) return;
+        long us=server-(System.nanoTime()-presentNs)/1000-frame.captureNs/1000;
         if(us<0 || us>10_000_000) return;
         screenSumUs.addAndGet(us); screenCount.incrementAndGet();
     }
     /** One stats window: the OSD's numbers and counters. latencyMs / screenMs are -1 without data. */
     public record Window(long kbps,double latencyMs,double fps,long latencyFrames,long frames,long bytes,
-                         double screenMs,long screenFrames) {
+                         double screenMs,long screenFrames,String stages) {
         /** OSD text: "<kbps> kbps, <fps> fps, <camera-to-screen> ms" ("---" until known). */
         public String osd() {
             String glass=screenMs>=0 ? String.format(Locale.US,"%.1f",screenMs) : "---";
@@ -135,8 +157,8 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         }
         /** key=value log line, in place of screenshots. */
         public String log(SynchClient clock) {
-            return String.format(Locale.US,"kbps=%d latency_ms=%.3f screen_latency_ms=%.3f fps=%.2f latency_frames=%d screen_frames=%d frames=%d bytes=%d sync_delay_us=%d",
-                kbps,latencyMs,screenMs,fps,latencyFrames,screenFrames,frames,bytes,clock.delayUs());
+            return String.format(Locale.US,"kbps=%d latency_ms=%.3f screen_latency_ms=%.3f fps=%.2f latency_frames=%d screen_frames=%d frames=%d bytes=%d sync_delay_us=%d %s",
+                kbps,latencyMs,screenMs,fps,latencyFrames,screenFrames,frames,bytes,clock.delayUs(),stages);
         }
     }
     /** Closes the window since the previous call. */
@@ -147,11 +169,17 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         double fps=(f-statsFrames)/s;
         long n=latencyCount.getAndSet(0), sum=latencySumUs.getAndSet(0);
         long sn=screenCount.getAndSet(0), ssum=screenSumUs.getAndSet(0);
+        long an=arrivalN.getAndSet(0), a=arrivalUs.getAndSet(0);
+        long qn=stageN.getAndSet(0), q=queueUs.getAndSet(0), d=decodeUs.getAndSet(0);
+        long pn=presentN.getAndSet(0), p=presentUs.getAndSet(0);
+        String stages=String.format(Locale.US,"arrival_ms=%.1f queue_ms=%.1f decode_ms=%.1f present_ms=%.1f",
+            an>0 ? a/1000.0/an : -1, qn>0 ? q/1000.0/qn : -1, qn>0 ? d/1000.0/qn : -1, pn>0 ? p/1000.0/pn : -1);
         statsAtNs=now; statsBytes=b; statsFrames=f;
-        return new Window(kbps,n>0 ? sum/1000.0/n : -1,fps,n,f,b,sn>0 ? ssum/1000.0/sn : -1,sn);
+        return new Window(kbps,n>0 ? sum/1000.0/n : -1,fps,n,f,b,sn>0 ? ssum/1000.0/sn : -1,sn,stages);
     }
     // Called on the serialized native feed path. Never on the USB reader.
     private void onAccessUnit(byte[] annexB,long pts,boolean key) {
+        final long auNs=System.nanoTime();
         if(needKey && !key) return;
         int index=decoder.dequeueInputBuffer(10000);
         if(index<0) { needKey=true; return; }
@@ -162,11 +190,19 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         input.clear(); input.put(annexB);
         lastPts=Math.max(lastPts+1,pts);
         Long capture=captureByRtpTs.remove(completedAuTs());
+        Frame frame=null;
         if(capture!=null) {
+            frame=new Frame(capture,auNs);
+            long server=clock.serverNowUs();
+            if(server!=Long.MIN_VALUE) {
+                long us=server-(System.nanoTime()-auNs)/1000-capture/1000;
+                if(us>=0 && us<10_000_000) { arrivalUs.addAndGet(us); arrivalN.incrementAndGet(); }
+            }
             if(captureByPts.size()>64) captureByPts.clear(); // decoder dropped frames
-            captureByPts.put(lastPts,capture);
+            captureByPts.put(lastPts,frame);
         }
         decoder.queueInputBuffer(index,0,annexB.length,lastPts,0); needKey=false;
+        if(frame!=null) frame.queuedNs=System.nanoTime();
     }
     @Override public void close() {
         synchronized(this) {

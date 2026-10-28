@@ -286,8 +286,13 @@ The same numbers go to logcat once a second, tag `RoverOSD`, as key=value.
 Read these instead of screenshots:
 
 ```text
-kbps=6023 latency_ms=85.681 screen_latency_ms=101.240 fps=29.90 latency_frames=30 screen_frames=30 frames=12345 bytes=… sync_delay_us=812
+kbps=6023 latency_ms=85.681 screen_latency_ms=101.240 fps=29.90 latency_frames=30 screen_frames=30 frames=12345 bytes=… sync_delay_us=812 arrival_ms=68.7 queue_ms=2.1 decode_ms=5.4 present_ms=25.7
 ```
+
+The line ends with per-stage means for the second: `arrival_ms` (capture to
+the AU's last USB packet, P4 clock), `queue_ms` (AU to `queueInputBuffer`),
+`decode_ms` (`queueInputBuffer` to decoder output) and `present_ms` (decoder
+output to the display's present, Android 14+); `-1.0` without data.
 
 `latency_ms=-1.000` (`screen_latency_ms=-1.000`) means no frame decoded
 (rendered) in the second had a capture time, or the clock had not synced. `sync_delay_us` is the round trip of the USB sync
