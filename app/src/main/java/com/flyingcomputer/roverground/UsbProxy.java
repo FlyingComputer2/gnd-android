@@ -162,15 +162,35 @@ public final class UsbProxy implements AutoCloseable {
             }
         } catch(Exception e) { fail(e); }
     }
+    // Several IN requests stay queued, so the host controller always has a buffer for the
+    // device's next transfer. One synchronous bulkTransfer at a time left the bus idle between
+    // transfers (the P4 ends a transfer per record), which delayed frame bursts.
+    private static final int READ_REQUESTS=4, READ_BYTES=16384;
     private void readLoop() {
-        byte[] bytes=new byte[8192];
+        List<UsbRequest> requests=new ArrayList<>();
         try {
+            for(int i=0;i<READ_REQUESTS;i++) {
+                UsbRequest r=new UsbRequest();
+                if(!r.initialize(connection,input)) throw new IOException("USB read request init failed");
+                ByteBuffer b=ByteBuffer.allocateDirect(READ_BYTES);
+                r.setClientData(b);
+                if(!r.queue(b)) throw new IOException("USB read queue failed");
+                requests.add(r);
+            }
+            byte[] bytes=new byte[READ_BYTES];
             while(running) {
-                int n=connection.bulkTransfer(input,bytes,bytes.length,500);
-                if(n>0) parser.feed(bytes,n,this::onPacket);
-                // Timeout and detach both return -1; Activity handles detach broadcasts.
+                UsbRequest done;
+                try { done=connection.requestWait(500); }
+                catch(TimeoutException timeout) { continue; }
+                if(done==null) continue; // detach; Activity handles detach broadcasts
+                ByteBuffer b=(ByteBuffer)done.getClientData();
+                int n=b.position();
+                if(n>0) { b.flip(); b.get(bytes,0,n); parser.feed(bytes,n,this::onPacket); }
+                b.clear();
+                if(running && !done.queue(b)) throw new IOException("USB read requeue failed");
             }
         } catch(Exception e) { if(running) fail(e); }
+        finally { for(UsbRequest r:requests) { r.cancel(); r.close(); } }
     }
     private Wire.Packet nextPacket() {
         synchronized(state) {

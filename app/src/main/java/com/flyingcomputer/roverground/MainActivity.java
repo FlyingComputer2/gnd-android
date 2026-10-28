@@ -47,6 +47,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        preferFastestRefresh();
         manager=(UsbManager)getSystemService(USB_SERVICE);
         FrameLayout root=new FrameLayout(this);
         view=new SurfaceView(this); view.getHolder().addCallback(this); root.addView(view);
@@ -72,6 +73,18 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         else registerReceiver(events,filter);
         show("Connect P4 High Speed USB (USB3), then grant permission");
         ui.post(osdTick);
+    }
+    // Each refresh a decoded frame waits for the display costs latency (about 1.5 refreshes
+    // from decode to screen), so ask for the fastest mode at the current resolution.
+    private void preferFastestRefresh() {
+        Display display=getWindowManager().getDefaultDisplay();
+        Display.Mode current=display.getMode(), best=current;
+        for(Display.Mode m:display.getSupportedModes())
+            if(m.getPhysicalWidth()==current.getPhysicalWidth() && m.getPhysicalHeight()==current.getPhysicalHeight()
+               && m.getRefreshRate()>best.getRefreshRate()) best=m;
+        WindowManager.LayoutParams lp=getWindow().getAttributes();
+        lp.preferredDisplayModeId=best.getModeId();
+        getWindow().setAttributes(lp);
     }
     private void submit(Runnable work) {
         try { setup.execute(work); }
