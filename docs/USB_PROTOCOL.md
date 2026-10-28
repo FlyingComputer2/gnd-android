@@ -21,6 +21,7 @@ Coordinate changes across both repositories.
 | Channel 0 | Receive-only RTP H.264, format `rtp-h264-v1` |
 | Channel 1 | MSP DisplayPort, TBA |
 | Channel 2 | MSP RC telemetry, TBA |
+| Channel 3 | Clock sync, format `synch-v1`, bidirectional |
 
 Android uses checked Java `int` values for u16 channels. Session and sequence
 fields use Java int bit patterns; negative Java values are valid u32 wire values.
@@ -241,3 +242,47 @@ OFDM_24M, 15 dBm and no manager FEC. L3 pins and compatibility patch remain
 unchanged. Radio proxy is local UDP 22/9000; manager console 127.0.0.1:2400.
 P4 multicast is 239.255.42.1:5600 (RTP payload 96, H264/90000, TTL 1), enabled
 when Ethernet has IPv4. USB video requires no Ethernet cable or DHCP lease.
+
+## Channel 3: clock sync
+
+Channel 3 carries app_synch rtt datagrams unchanged (winject-l3
+`docs/synch.md`). The phone's `SynchClient` sends one `sync_request` a second.
+The P4 answers each request against its own `CLOCK_REALTIME` as it arrives,
+which is the clock the rover follows. LIST and OPEN report `format:"synch-v1"`
+and `read_only:false`. MTU is 64.
+
+| Message | Bytes (big-endian) |
+| --- | --- |
+| `sync_request` | `01`, u32 trid |
+| `sync_response` | `02`, u32 trid, i64 server_time_us |
+
+The phone keeps its offset to the P4 clock against `elapsedRealtime`, from the
+lowest-delay exchange of the last eight. The OSD (top left) shows, once a
+second:
+
+- Channel-0 kbps.
+- Camera-to-decode latency: the P4 clock when `MediaCodec` outputs a frame,
+  minus the capture `CLOCK_REALTIME` the rover's packer wrote into that frame's
+  RTP header extension id 2. This is the mean over the second, `---` before
+  the clock syncs.
+- Decoder output fps.
+
+The accuracy of the latency figure rests on three things:
+- The rover's sync to the ground: rtt measured −3 to +2 ms under video, the
+  wire tens of µs.
+- The USB exchange: sub-millisecond.
+- The ground's own `CLOCK_REALTIME`: it follows the GS host's chrony over SNTP.
+
+The same numbers go to logcat once a second, tag `RoverOSD`, as key=value.
+Read these instead of screenshots:
+
+```text
+kbps=6023 latency_ms=85.681 fps=29.90 latency_frames=30 frames=12345 bytes=… sync_delay_us=812
+```
+
+`latency_ms=-1.000` means no frame in the second had a capture time, or the
+clock had not synced. `sync_delay_us` is the round trip of the USB sync
+exchange the offset came from.
+
+An app that registers channel 3 needs firmware that lists it; discovery rejects
+missing channels, so update P4 and Android together.
