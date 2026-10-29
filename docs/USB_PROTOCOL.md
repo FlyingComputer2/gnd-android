@@ -257,11 +257,26 @@ and `read_only:false`. MTU is 64.
 | `sync_response` | `02`, u32 trid, i64 server_time_us |
 
 The phone keeps its offset to the P4 clock against `elapsedRealtime`, from the
-lowest-delay exchange of the last eight. The OSD (top left) shows, once a second, `<kbps> kbps, <fps> fps, <ms> ms`:
+lowest-delay exchange of the last eight. The OSD (top left) refreshes once a second:
 
-- Channel-0 kbps.
-- Decoder output fps.
-- Camera-to-screen (glass) latency, Android 14+: the P4 clock when the display
+```text
+frame 29.9 fps
+error 0.1 fps
+jitter 1.2 ms
+latency 101.2 ms
+```
+
+- `frame`: decoder output fps over the last refresh interval.
+- `error`: `max(0, 30 - decoded frames / seconds)` over the last five seconds
+  (time since receiver creation during startup). The nominal video rate is 30 fps.
+  This counts the rate shortfall, including losses before decode, rather than
+  decoder corruption reports.
+- `jitter`: mean absolute deviation of decoded-frame intervals from their mean
+  interval over a rolling five-second window, using `System.nanoTime()`. Each
+  interval belongs to the window of its ending frame; `---` without intervals.
+  Steady slow playback can have zero jitter and positive error. Metrics expire
+  during a stall and reset for each receiver.
+- `latency`: camera-to-screen (glass) latency, Android 14+: the P4 clock when the display
   showed a frame, minus the capture `CLOCK_REALTIME` the rover's packer wrote
   into that frame's RTP header extension id 2; the mean over the second, `---`
   before the clock syncs (and on older Android). The app presents frames
@@ -273,7 +288,7 @@ lowest-delay exchange of the last eight. The OSD (top left) shows, once a second
   `OnFrameRenderedListener` is not used: on the test phone it reports the
   requested render time, not the display time.
 
-The log also keeps camera-to-decode latency (`latency_ms`): the same
+The log also keeps channel-0 bitrate and camera-to-decode latency (`latency_ms`): the same
 difference taken when `MediaCodec` outputs the frame.
 
 The accuracy of the latency figure rests on three things:
@@ -286,7 +301,7 @@ The same numbers go to logcat once a second, tag `RoverOSD`, as key=value.
 Read these instead of screenshots:
 
 ```text
-kbps=6023 latency_ms=85.681 screen_latency_ms=101.240 fps=29.90 latency_frames=30 screen_frames=30 frames=12345 bytes=… sync_delay_us=812 arrival_ms=68.7 queue_ms=2.1 decode_ms=5.4 present_ms=25.7
+kbps=6023 latency_ms=85.681 screen_latency_ms=101.240 fps=29.90 decode_error_fps=0.100 frame_pacing_error_ms=1.200 latency_frames=30 screen_frames=30 frames=12345 bytes=… sync_delay_us=812 arrival_ms=68.7 queue_ms=2.1 decode_ms=5.4 present_ms=25.7
 ```
 
 The line ends with per-stage means for the second: `arrival_ms` (capture to

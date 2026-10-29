@@ -31,6 +31,7 @@ No MSP proxy, USB network adapter, RTSP server or recording UI is implemented.
 | `MainActivity.java` | Surface lifecycle, USB permissions/discovery, setup and cleanup |
 | `UsbProxy.java` | Handler registration, management, format validation, credits and bounded queues |
 | `Wire.java` | RGP4 v2 codec/parser; unsigned 16-bit channel IDs |
+| `FramePacing.java` | Rolling five-second decode rate shortfall and interval deviation |
 | `VideoReceiver.java` | Channel-0 handler, synchronized JNI lifetime, MediaCodec input/output |
 | `ScreenPresenter.java` | Android 14+: presents decoded frames via `SurfaceControl` and reports each frame's display time |
 | `receiver.cpp` / `receiver.hpp` | Portable RTP/H.264 depayloading and AU callback |
