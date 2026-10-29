@@ -53,6 +53,7 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     private final AtomicLong screenSumUs=new AtomicLong(), screenCount=new AtomicLong();
     private final AtomicLong bytes=new AtomicLong(), frames=new AtomicLong();
     private final AtomicLong latencySumUs=new AtomicLong(), latencyCount=new AtomicLong();
+    private final FramePacing pacing=new FramePacing(System.nanoTime());
     private long statsAtNs=System.nanoTime(), statsBytes, statsFrames;
     public VideoReceiver(SurfaceView view,SynchClient clock) throws Exception {
         this.clock=clock;
@@ -118,6 +119,7 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     // AU when the marker was lost.
     private long completedAuTs() { return packetMarker ? packetTs : previousTs; }
     private void onDecoded(long pts) {
+        pacing.frame(System.nanoTime());
         frames.incrementAndGet();
         Frame frame=captureByPts.remove(pts);
         long server=clock.serverNowUs();
@@ -149,16 +151,17 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
     }
     /** One stats window: the OSD's numbers and counters. latencyMs / screenMs are -1 without data. */
     public record Window(long kbps,double latencyMs,double fps,long latencyFrames,long frames,long bytes,
-                         double screenMs,long screenFrames,String stages) {
-        /** OSD text: "<kbps> kbps, <fps> fps, <camera-to-screen> ms" ("---" until known). */
+                         double screenMs,long screenFrames,String stages,double framePacingErrorMs,double decodeErrorFps) {
+        /** Four-line OSD, with --- until a measurement is available. */
         public String osd() {
             String glass=screenMs>=0 ? String.format(Locale.US,"%.1f",screenMs) : "---";
-            return String.format(Locale.US,"%d kbps, %.1f fps, %s ms",kbps,fps,glass);
+            String jitter=framePacingErrorMs>=0 ? String.format(Locale.US,"%.1f",framePacingErrorMs) : "---";
+            return String.format(Locale.US,"frame %.1f fps\nerror %.1f fps\njitter %s ms\nlatency %s ms",fps,decodeErrorFps,jitter,glass);
         }
         /** key=value log line, in place of screenshots. */
         public String log(SynchClient clock) {
-            return String.format(Locale.US,"kbps=%d latency_ms=%.3f screen_latency_ms=%.3f fps=%.2f latency_frames=%d screen_frames=%d frames=%d bytes=%d sync_delay_us=%d %s",
-                kbps,latencyMs,screenMs,fps,latencyFrames,screenFrames,frames,bytes,clock.delayUs(),stages);
+            return String.format(Locale.US,"kbps=%d latency_ms=%.3f screen_latency_ms=%.3f fps=%.2f frame_pacing_error_ms=%.3f decode_error_fps=%.3f latency_frames=%d screen_frames=%d frames=%d bytes=%d sync_delay_us=%d %s",
+                kbps,latencyMs,screenMs,fps,framePacingErrorMs,decodeErrorFps,latencyFrames,screenFrames,frames,bytes,clock.delayUs(),stages);
         }
     }
     /** Closes the window since the previous call. */
@@ -175,7 +178,7 @@ public final class VideoReceiver implements UsbProxy.Handler, AutoCloseable {
         String stages=String.format(Locale.US,"arrival_ms=%.1f queue_ms=%.1f decode_ms=%.1f present_ms=%.1f",
             an>0 ? a/1000.0/an : -1, qn>0 ? q/1000.0/qn : -1, qn>0 ? d/1000.0/qn : -1, pn>0 ? p/1000.0/pn : -1);
         statsAtNs=now; statsBytes=b; statsFrames=f;
-        return new Window(kbps,n>0 ? sum/1000.0/n : -1,fps,n,f,b,sn>0 ? ssum/1000.0/sn : -1,sn,stages);
+        return new Window(kbps,n>0 ? sum/1000.0/n : -1,fps,n,f,b,sn>0 ? ssum/1000.0/sn : -1,sn,stages,pacing.errorMs(now),pacing.decodeErrorFps(now,30));
     }
     // Called on the serialized native feed path. Never on the USB reader.
     private void onAccessUnit(byte[] annexB,long pts,boolean key) {
